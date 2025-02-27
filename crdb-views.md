@@ -1,8 +1,8 @@
 # CockroachDB Views
 
-CockroachDB supports both regular SQL views and materialized views. In this article, I will review the key similarities and differences between them. I will then discuss how they can be leveraged in modern software applications.
+ CockroachDB supports both regular SQL views and materialized views. In this article, I will review the key similarities and differences between them. I will then discuss how they can be leveraged in modern software applications.
 
-A view is a read-only virtual table created based on a SELECT statement that pulls data from one or multiple tables. The result set from this query defines the view. Once created, a view can be queried using SELECT, just like a regular table.
+A view is a read-only virtual table created based on a SELECT statement that pulls data from one or multiple tables. The result set from this query defines the view. Once created, a view can be queried using SELECT, just like a regular table. In this article, I will explain some fundamentals of views.
 
 In this article, I'll be using a simple database with two tables to demonstrate the various features and capabilities of CockroachDB views. Before we begin delving into the details, let's look at the database schema.
 
@@ -127,8 +127,9 @@ Time: 6ms total (execution 6ms / network 1ms)
 Time: 5ms total (execution 4ms / network 0ms)
 ```
 
+From an application programmer’s perspective, querying a view is much simpler than querying the underlying tables. This is especially true for complex queries that involve selecting specific columns across multiple tables, performing aggregations, calculations, ordering, and grouping.
 
-We can clearly see that, from the application programmer's perspective, querying a view is simpler than querying the underlying table. This becomes especially evident with complex queries that selectively pull columns across multiple tables and perform various aggregations, calculations, ordering, and grouping. Here is a slightly more complex example.
+Here’s a slightly more complex example:
 
 
 ```sql
@@ -141,7 +142,8 @@ CREATE VIEW datapoint_aggregations_by_region AS
 ```
 
 
-This view keeps track of the number of datapoints logged by all the stations in each region, along with some statistical data about the datapoints' values. It effectively abstracts the underlying tables and makes consuming these stats much easier and more flexible for the user or application.
+This view tracks the number of data points logged by all stations in each region, along with statistical insights about their values. It effectively abstracts the underlying tables, making it easier and more flexible for users or applications to consume these statistics.
+
 
 ```sql
 > SELECT * FROM datapoint_aggregations_by_region ORDER BY count;                                             
@@ -176,9 +178,11 @@ Time: 16.185s total (execution 16.184s / network 0.001s)
 ```
 
 
-Since views act as a buffer between the underlying tables and the queries run against them, they can serve as an effective mechanism for controlling data exposure. For example, the station IDs in the `stations` and `datapoints` tables are not exposed via the view. Therefore, a user who has access to the view but not the underlying tables will not be able to see them. Let's demonsterate this on an example.
+Since views act as a buffer between underlying tables and the queries run against them, they can serve as an effective mechanism for controlling data exposure. For example, station IDs in the `stations` and `datapoints` tables are not exposed through the view. As a result, a user with access to the view but not the underlying tables will be unable to see them.
 
-Create a new user:
+Let's demonstrate this with an example.
+
+First, we create a new user:
 
 ```sql
 CREATE ROLE view_reader WITH PASSWORD NULL
@@ -203,6 +207,8 @@ CREATE ROLE view_reader WITH PASSWORD NULL
 (2 rows)
 ```
 
+The only permission granted to the new user will be the ability to read from this specific view.
+
 ```sql
 GRANT SELECT ON station_count_by_region TO view_reader
 ```
@@ -217,7 +223,7 @@ GRANT SELECT ON station_count_by_region TO view_reader
 (3 rows)
 ```
 
-Logged in now as the `view_reader` user, I can `SELECT` from the view while the underlying tables remain unaccessible to me.
+After logging out and back in as the view_reader user, I can successfully SELECT from the view while the underlying tables remain inaccessible.
 
 ```sql
 > SELECT * FROM station_count_by_region;
@@ -266,9 +272,11 @@ SQLSTATE: 42501
 > Don't forget to log out and log back in as `root` user to continue.
 
 
-## Abstracting Underlaying Table Schema Changes
+## Improving Application Maintainability
 
-As the applications supported by the database(s) evolve, the tables may need alterations, like adding new columns or changing column type. Let's consider an application that queries the `datapoints` table for ten random row using a wildcard for the columns:
+Often, multiple applications access the same database. SQL statements may be scattered across the source code and maintained by different developers. As applications evolve, the underlying tables may require modifications, such as adding new columns.
+
+Let's consider an application that queries the `datapoints` table for ten random rows using a wildcard to select all columns:
 
 ```sql
 > SELECT * FROM datapoints ORDER BY random() LIMIT 10;                                                             
@@ -289,13 +297,16 @@ As the applications supported by the database(s) evolve, the tables may need alt
 Time: 4.435s total (execution 4.434s / network 0.001s)
 ```
 
-The application logic expects the result set to have seven columns. Now let's imagine that a new column is added to the `datapoints` tables:
+The application logic expects the result set to contain seven columns. Now, imagine a new column is added to the `datapoints` table:
+
+
 
 ```sql
 > ALTER TABLE datapoints ADD COLUMN param5 JSONB DEFAULT '{}';
 ```
 
-If the application logic is not prepared to handle an eight-column results set from the same `SELECT` query, the change in the table structure we just introduced has broke the application.
+If the application logic is not designed to handle an eight-column result set from the same SELECT query, the change in table structure we introduced has broken the application.
+
 
 ```sql
 > SELECT * FROM datapoints ORDER BY random() LIMIT 10;                                                             
@@ -316,7 +327,8 @@ If the application logic is not prepared to handle an eight-column results set f
 Time: 9.920s total (execution 9.919s / network 0.001s)
 ```
 
-To ensure that schema change don't negatively affect the applications using our database, we can decouple the two using a view.
+Instead of modifying queries across multiple applications, we can decouple the application code from the database tables by using a view as an intermediary layer.
+
 
 ```sql
 > CREATE VIEW datapoints_view AS
@@ -324,7 +336,7 @@ To ensure that schema change don't negatively affect the applications using our 
     FROM datapoints;
 ```
 
-Using this new view instead of the underlying table directly protect the application logic from breaking if schema changes are introduced over time.
+Using this new view instead of querying the underlying table directly protects the application logic from breaking when new columnss are introduced in the underlying table over time.
 
 ```sql
 > SELECT * FROM datapoints_view ORDER BY random() LIMIT 10;                                                        
@@ -714,15 +726,6 @@ REFRESH MATERIALIZED VIEW datapoint_aggregations_by_region_mt;
 
 
 
-
-3. Providing Data Abstraction
-Views offer a layer of abstraction by presenting a consistent structure to applications, even if the underlying tables change.  
-
-4. Improving Maintainability
-Instead of modifying queries across multiple applications, you can update a view in one place to apply changes system-wide.  
-
-5. Facilitating Data Aggregation and Reporting
-Views make it easy to create summary tables for reporting, combining multiple sources into a single, readable format.  
 
 
 ## What Are Materialized Views Used For?
