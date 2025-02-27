@@ -649,49 +649,70 @@ Using `EXPLAIN` again, we can see a full scan with the consequitive filtering on
 (14 rows)
 ```
 
-This time, `EXPLAIN` even makes a suggestion how to create an index that will help optimize the query. Note the use of `STORING` which is useful when the query selects but not filtering certain columns.
+This time, `EXPLAIN` even suggests how to create an index to optimize the query. Note the use of `STORING`, which is useful when the query selects certain columns without filtering on them.
 
-After create the recommended index, the same `SELECT` is a lot quicker.
+After creating the recommended index, the same SELECT query runs much faster.
 
 ```bash
 Time: 66ms total (execution 14ms / network 53ms)
 ```
 
 
-
-
-## Materialized Views and CDC
-
->[!NOTE]
-> Here I'm going to talk about creating a CHANGEFEED based on a materialized view since an MV is like a table...
+## Refreshing Materialized Views
 
 
 
 
+```sql
+> SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
+           region           | count  |            min             |            max             |    sum    |  round
+----------------------------+--------+----------------------------+----------------------------+-----------+-----------
+  AP East (Hong Kong)       | 386510 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |  2.64081
+  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
+  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
+  AP South (Mumbai)         | 378671 | 2024-01-01 00:01:10.243655 | 2025-12-31 22:11:12.574419 | 189667226 | -0.24969
+  AP Southeast (Singapore)  | 421397 | 2024-01-01 00:00:28.748414 | 2025-12-31 21:36:30.986551 | 210984424 | -0.78571
+  ```
+
+```sql
+t> SELECT * FROM stations WHERE region='AP East (Hong Kong)' LIMIT 1;                                               
+                   id                  |       region
+---------------------------------------+----------------------
+  15ac82da-072f-4403-8445-4ffc4a17c774 | AP East (Hong Kong)
+(1 row)
+```
+
+15 times
+
+```sql
+INSERT INTO datapoints (at,station,param0,param1,param2,param3,param4)
+    VALUES (now(),'15ac82da-072f-4403-8445-4ffc4a17c774',0,1,2.5,-3.7,'Hello World!');
+```
+
+```sql
+> SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
+           region           | count  |            min             |            max             |    sum    |  round
+----------------------------+--------+----------------------------+----------------------------+-----------+-----------
+  AP East (Hong Kong)       | 386510 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |  2.64081
+  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
+  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
+```
+
+```sql
+REFRESH MATERIALIZED VIEW datapoint_aggregations_by_region_mt;
+```
+
+```sql
+> SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
+           region           | count  |            min             |            max             |    sum    |  round
+----------------------------+--------+----------------------------+----------------------------+-----------+-----------
+  AP East (Hong Kong)       | 386525 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |   2.6408
+  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
+  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
+```
 
 
 
-
-
-
-
-
-
-5. **Both Can Improve Query Performance (in Different Ways)**  
-   - While materialized views store results physically for faster access, **even standard views** can enhance performance by encapsulating optimized queries.  
-
-
-
-### **Key Difference**  
-- **Views** always pull the latest data dynamically from the base tables.  
-- **Materialized Views** store data physically and need to be **refreshed** to reflect updates.  
-
-Would you like an example to illustrate their similarities and differences? 😊
-
-
-## Views
-
-## What Are Views Used For?
 
 
 3. Providing Data Abstraction
@@ -703,12 +724,6 @@ Instead of modifying queries across multiple applications, you can update a view
 5. Facilitating Data Aggregation and Reporting
 Views make it easy to create summary tables for reporting, combining multiple sources into a single, readable format.  
 
-
-## Materialized views
-
-
-### **What Are Materialized Views?**  
-A **materialized view** is a **physical, stored result** of a query, unlike a regular view, which is just a virtual representation of data. The materialized view is computed and stored in the database, meaning it does not dynamically update with every query like a standard view. Instead, it must be **refreshed** explicitly or on a schedule.  
 
 ## What Are Materialized Views Used For?
 
@@ -726,14 +741,6 @@ Instead of running analytics directly on live transactional tables, materialized
 
 5. Indexing for Faster Query Performance
 CockroachDB allows materialized views to have indexes, making queries even more efficient.
-
-## Key Differences: View vs. Materialized View  
-| Feature | Standard View | Materialized View |
-|---------|--------------|------------------|
-| Data Storage | No (virtual) | Yes (physical) |
-| Query Performance | Depends on the underlying query | Faster (precomputed results) |
-| Updates | Always up-to-date | Must be refreshed manually or on a schedule |
-| Use Case | Simplifying queries, security | Speeding up analytics, reducing expensive computations |
 
 
 
