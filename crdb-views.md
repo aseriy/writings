@@ -266,7 +266,7 @@ SQLSTATE: 42501
 > Don't forget to log out and log back in as `root` user to continue.
 
 
-## Abstracting Underlaying Table Complexity
+## Abstracting Underlaying Table Schema Changes
 
 As the applications supported by the database(s) evolve, the tables may need alterations, like adding new columns or changing column type. Let's consider an application that queries the `datapoints` table for ten random row using a wildcard for the columns:
 
@@ -319,7 +319,9 @@ Time: 9.920s total (execution 9.919s / network 0.001s)
 To ensure that schema change don't negatively affect the applications using our database, we can decouple the two using a view.
 
 ```sql
-> CREATE VIEW datapoints_view AS SELECT at, station, param0, param1, param2, param3, param4 FROM datapoints;
+> CREATE VIEW datapoints_view AS
+    SELECT at, station, param0, param1, param2, param3, param4
+    FROM datapoints;
 ```
 
 Using this new view instead of the underlying table directly protect the application logic from breaking if schema changes are introduced over time.
@@ -344,14 +346,332 @@ Time: 17.584s total (execution 17.583s / network 0.001s)
 ```
 
 
+>[!WARNING]
+> This approach using views works only when new columns are added. However, to be fair, removing columns from a table should be rare. If truly necessary, it should be treated as a special effort, requiring a thorough review and retesting of associated applications.
+
+
 
 # Materialized Views
+
+While views are "virtual" tables that query the underlying physical tables each time they are accessed, materialized views store a physical copy of the query result. This key distinction makes materialized views extremely powerful, but before exploring their advantages, let's address their main drawback. Unlike regular views, which always retrieve up-to-date data from the underlying tables, materialized views act as snapshots that must be refreshed to reflect the latest changes. We’ll discuss how to refresh a materialized view later.
+
+
+## Performance via Pre-Compute
+
+A materialized view doesn’t re-run its base query each time it’s accessed. Instead, it serves a snapshot of the data saved when the view was created or last refreshed. Of course, querying a materialized view (SELECT) may involve filtering, ordering, grouping, and some calculations, but these operations are minimal compared to the compute time and resources required to refresh the view itself. Let's see this with some examples.
+
+Earlier, we created the `datapoint_aggregations_by_region` view. Let's create its materialized counterpart and run the same queries against both.
+
+```sql
+CREATE MATERIALIZED VIEW datapoint_aggregations_by_region_mt AS
+    SELECT s.region, count(dp.at),
+        min(dp.at), max(dp.at), sum(dp.param0), round(avg(dp.param2),5)
+    FROM datapoints AS dp JOIN stations AS s
+    ON s.id=dp.station GROUP BY s.region
+    ORDER BY s.region;
+```
+
+```sql
+> show tables;                                                                                                     
+  schema_name |             table_name              |       type        | owner | estimated_row_count |              locality
+--------------+-------------------------------------+-------------------+-------+---------------------+--------------------------------------
+  public      | datapoint_aggregations_by_region    | view              | root  |                   0 | REGIONAL BY TABLE IN PRIMARY REGION
+  public      | datapoint_aggregations_by_region_mt | materialized view | root  |                   0 | GLOBAL
+  public      | datapoints                          | table             | root  |             8981218 | REGIONAL BY TABLE IN PRIMARY REGION
+  public      | station_count_by_region             | view              | root  |                   0 | REGIONAL BY TABLE IN PRIMARY REGION
+  public      | stations                            | table             | root  |                1000 | REGIONAL BY TABLE IN PRIMARY REGION
+(5 rows)
+
+Time: 92ms total (execution 91ms / network 1ms)
+```
+
+```sql
+> SELECT * FROM datapoint_aggregations_by_region;                                                                  
+           region           | count  |            min             |            max             |    sum    |  round
+----------------------------+--------+----------------------------+----------------------------+-----------+-----------
+  US West (N. California)   | 350691 | 2024-01-01 00:00:12.516719 | 2025-12-31 16:49:36.597159 | 175446728 |  0.45717
+  South America (São Paulo) | 359165 | 2024-01-01 00:00:58.795327 | 2025-12-31 23:52:08.399068 | 179633084 |  0.91175
+  EU North (Stockholm)      | 404430 | 2024-01-01 00:01:03.080359 | 2025-12-31 16:59:28.252544 | 202458880 |  0.26389
+  AP Southeast (Singapore)  | 421397 | 2024-01-01 00:00:28.748414 | 2025-12-31 21:36:30.986551 | 210984424 | -0.78571
+  US East (N. Virginia)     | 358626 | 2024-01-01 00:04:27.843226 | 2025-12-31 17:54:48.949153 | 179806306 | -0.58655
+  Africa (Cape Town)        | 449143 | 2024-01-01 00:00:53.847385 | 2025-12-31 15:29:16.767401 | 224587484 |   0.0202
+  EU West (Paris)           | 377413 | 2024-01-01 00:01:36.959771 | 2025-12-31 23:29:52.332873 | 188928503 |  0.45059
+  EU West (Ireland)         | 359352 | 2024-01-01 00:02:13.307588 | 2025-12-31 22:01:10.943634 | 180158447 | -1.24578
+  US East (Ohio)            | 368750 | 2024-01-01 00:00:40.68811  | 2026-01-01 00:22:08.381134 | 184493835 |   0.1954
+  EU West (London)          | 368435 | 2024-01-01 00:00:15.368232 | 2025-12-31 23:36:58.871405 | 184326196 |  0.53084
+  Middle East (UAE)         | 359750 | 2024-01-01 00:04:19.00066  | 2025-12-31 12:45:20.493968 | 180176997 | -1.23177
+  Middle East (Bahrain)     | 377942 | 2024-01-01 00:02:50.66522  | 2025-12-31 17:16:53.973532 | 189118140 | -1.41936
+  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
+  EU Central (Frankfurt)    | 457772 | 2024-01-01 00:02:19.140562 | 2025-12-31 20:00:30.427561 | 229213986 |  0.60474
+  US West (Oregon)          | 403878 | 2024-01-01 00:00:07.869981 | 2025-12-31 19:06:13.687629 | 202310533 | -0.16474
+  US Central (Iowa)         | 457892 | 2024-01-01 00:00:28.579195 | 2025-12-31 21:53:40.025324 | 229144648 | -0.76366
+  CA Central (Montreal)     | 350275 | 2024-01-01 00:02:57.980154 | 2025-12-31 07:50:43.08553  | 175438109 | -1.58814
+  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
+  AP Southeast (Sydney)     | 420793 | 2024-01-01 00:02:51.279948 | 2025-12-31 22:11:52.821738 | 210754146 | -0.26514
+  US Mountain (Utah)        | 359870 | 2024-01-01 00:01:45.94707  | 2026-01-01 00:08:42.451892 | 180035426 |   0.1786
+  AP East (Hong Kong)       | 386510 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |  2.64081
+  EU South (Milan)          | 340904 | 2024-01-01 00:01:32.609678 | 2025-12-31 21:30:38.453781 | 170529055 | -0.15573
+  AP South (Mumbai)         | 378671 | 2024-01-01 00:01:10.243655 | 2025-12-31 22:11:12.574419 | 189667226 | -0.24969
+(23 rows)
+
+Time: 14.790s total (execution 14.788s / network 0.002s)
+```
+
+```sql
+> SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
+           region           | count  |            min             |            max             |    sum    |  round
+----------------------------+--------+----------------------------+----------------------------+-----------+-----------
+  AP East (Hong Kong)       | 386510 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |  2.64081
+  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
+  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
+  AP South (Mumbai)         | 378671 | 2024-01-01 00:01:10.243655 | 2025-12-31 22:11:12.574419 | 189667226 | -0.24969
+  AP Southeast (Singapore)  | 421397 | 2024-01-01 00:00:28.748414 | 2025-12-31 21:36:30.986551 | 210984424 | -0.78571
+  AP Southeast (Sydney)     | 420793 | 2024-01-01 00:02:51.279948 | 2025-12-31 22:11:52.821738 | 210754146 | -0.26514
+  Africa (Cape Town)        | 449143 | 2024-01-01 00:00:53.847385 | 2025-12-31 15:29:16.767401 | 224587484 |   0.0202
+  CA Central (Montreal)     | 350275 | 2024-01-01 00:02:57.980154 | 2025-12-31 07:50:43.08553  | 175438109 | -1.58814
+  EU Central (Frankfurt)    | 457772 | 2024-01-01 00:02:19.140562 | 2025-12-31 20:00:30.427561 | 229213986 |  0.60474
+  EU North (Stockholm)      | 404430 | 2024-01-01 00:01:03.080359 | 2025-12-31 16:59:28.252544 | 202458880 |  0.26389
+  EU South (Milan)          | 340904 | 2024-01-01 00:01:32.609678 | 2025-12-31 21:30:38.453781 | 170529055 | -0.15573
+  EU West (Ireland)         | 359352 | 2024-01-01 00:02:13.307588 | 2025-12-31 22:01:10.943634 | 180158447 | -1.24578
+  EU West (London)          | 368435 | 2024-01-01 00:00:15.368232 | 2025-12-31 23:36:58.871405 | 184326196 |  0.53084
+  EU West (Paris)           | 377413 | 2024-01-01 00:01:36.959771 | 2025-12-31 23:29:52.332873 | 188928503 |  0.45059
+  Middle East (Bahrain)     | 377942 | 2024-01-01 00:02:50.66522  | 2025-12-31 17:16:53.973532 | 189118140 | -1.41936
+  Middle East (UAE)         | 359750 | 2024-01-01 00:04:19.00066  | 2025-12-31 12:45:20.493968 | 180176997 | -1.23177
+  South America (São Paulo) | 359165 | 2024-01-01 00:00:58.795327 | 2025-12-31 23:52:08.399068 | 179633084 |  0.91175
+  US Central (Iowa)         | 457892 | 2024-01-01 00:00:28.579195 | 2025-12-31 21:53:40.025324 | 229144648 | -0.76366
+  US East (N. Virginia)     | 358626 | 2024-01-01 00:04:27.843226 | 2025-12-31 17:54:48.949153 | 179806306 | -0.58655
+  US East (Ohio)            | 368750 | 2024-01-01 00:00:40.68811  | 2026-01-01 00:22:08.381134 | 184493835 |   0.1954
+  US Mountain (Utah)        | 359870 | 2024-01-01 00:01:45.94707  | 2026-01-01 00:08:42.451892 | 180035426 |   0.1786
+  US West (N. California)   | 350691 | 2024-01-01 00:00:12.516719 | 2025-12-31 16:49:36.597159 | 175446728 |  0.45717
+  US West (Oregon)          | 403878 | 2024-01-01 00:00:07.869981 | 2025-12-31 19:06:13.687629 | 202310533 | -0.16474
+(23 rows)
+
+Time: 31ms total (execution 30ms / network 1ms)
+```
+
+We can observer the execution time improvment from almost 15 seconds to 31 milliseconds. The query against the materialized view is almost 500 times faster!
+
+Here is a more complex example. I'd like to compile a report of the datapoints created during the previuos day on an hourly basis.
+
+```sql
+CREATE VIEW prev_day_datapoints_by_hour AS
+  WITH t AS (
+    SELECT generate_series  (
+      (SELECT date(now()))::timestamp - INTERVAL '1 day',
+      (SELECT date(now()))::timestamp - '1 hour',
+      '1 hour'::interval
+    ) :: timestamp AS period
+  )
+  SELECT t.period, count(dp.at)
+    FROM t AS t LEFT JOIN datapoints AS dp
+      ON t.period <= dp.at AND dp.at < t.period +'1 hour'
+      GROUP BY t.period ORDER BY t.period;
+```
+
+```sql
+CREATE MATERIALIZED VIEW prev_day_datapoints_by_hour_mt AS
+  WITH t AS (
+    SELECT generate_series  (
+      (SELECT date(now()))::timestamp - INTERVAL '1 day',
+      (SELECT date(now()))::timestamp - '1 hour',
+      '1 hour'::interval
+    ) :: timestamp AS period
+  )
+  SELECT t.period, count(dp.at)
+    FROM t AS t LEFT JOIN datapoints AS dp
+      ON t.period <= dp.at AND dp.at < t.period +'1 hour'
+      GROUP BY t.period ORDER BY t.period;
+```
+
+Creating a regular view took 364 milliseconds, while creating a materialized view took 63.260 seconds. If the goal is to repeatedly access the generated report—such as through a microservice supporting a web or mobile application—the upfront compute cost of creating the materialized view is well justified. Over time, it will save the same time difference on every subsequent access.
+
+Here’s what the resulting report looks like:
+
+```sql
+> SELECT * FROM prev_day_datapoints_by_hour_mt;                                                                    
+        period        | count
+----------------------+--------
+  2025-02-26 00:00:00 |     7
+  2025-02-26 01:00:00 |     6
+  2025-02-26 02:00:00 |     6
+  2025-02-26 03:00:00 |     3
+  2025-02-26 04:00:00 |     1
+  2025-02-26 05:00:00 |     5
+  2025-02-26 06:00:00 |     2
+  2025-02-26 07:00:00 |     6
+  2025-02-26 08:00:00 |     5
+  2025-02-26 09:00:00 |     8
+  2025-02-26 10:00:00 |     6
+  2025-02-26 11:00:00 |     9
+  2025-02-26 12:00:00 |     7
+  2025-02-26 13:00:00 |     8
+  2025-02-26 14:00:00 |     2
+  2025-02-26 15:00:00 |     6
+  2025-02-26 16:00:00 |     4
+  2025-02-26 17:00:00 |     5
+  2025-02-26 18:00:00 |     3
+  2025-02-26 19:00:00 |     8
+  2025-02-26 20:00:00 |     3
+  2025-02-26 21:00:00 |     5
+  2025-02-26 22:00:00 |     5
+  2025-02-26 23:00:00 |     3
+(24 rows)
+
+Time: 35ms total (execution 34ms / network 1ms)
+```
+
+## Performance via Indexing
+
+Materialized views are essentially physical tables, much like regular tables. The key difference is that data in a regular table is modified directly through operations like INSERT, UPDATE, DELETE, and LOAD, whereas a materialized view’s data changes indirectly by inheriting updates from its underlying tables.
+
+Once created, additional indexes can be added to further optimize SELECT queries against the materialized view. Let's create a materialized view joins the `stations` and `datapoints` tables, creating a result set that could useful for operational analytics.
+
+```sql
+CREATE MATERIALIZED VIEW stations_datapoints_mv AS
+  SELECT
+      d.at, s.id, s.region,
+      d.param0, d.param1, d.param2, d.param3, d.param4
+  FROM stations as s JOIN datapoints as d
+  ON s.id=d.station
+  ORDER BY d.at;
+```
+
+```sql
+> SHOW COLUMNS FROM stations_datapoints_mv;                                                                        
+  column_name | data_type | is_nullable | column_default | generation_expression |            indices            | is_hidden
+--------------+-----------+-------------+----------------+-----------------------+-------------------------------+------------
+  at          | TIMESTAMP |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
+  id          | UUID      |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
+  region      | STRING    |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
+  param0      | INT8      |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
+  param1      | INT8      |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
+  param2      | FLOAT8    |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
+  param3      | FLOAT8    |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
+  param4      | STRING    |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
+  rowid       | INT8      |      f      | unique_rowid() |                       | {stations_datapoints_mv_pkey} |     t
+(9 rows)
+```
+
+Now, let's look at the following query:
+
+```sql
+SELECT COUNT(*) FROM stations_datapoints_mv WHERE length(param4)=23;
+```
+
+```bash
+Time: 22.211s total (execution 22.211s / network 0.001s)
+```
+
+Not a great timing. This is likely because the SQL statement `WHERE` clause condition needs to filter on the length of the string in the `param4` column.  We can review the query plan with the `EXPLAIN` statement:
+
+```sql
+> EXPLAIN SELECT COUNT(*) FROM stations_datapoints_mv WHERE length(param4)=23;                                     
+                                 info
+-----------------------------------------------------------------------
+  distribution: local
+  vectorized: true
+
+  • group (scalar)
+  │
+  └── • filter
+      │ filter: length(param4) = 23
+      │
+      └── • scan
+            missing stats
+            table: stations_datapoints_mv@stations_datapoints_mv_pkey
+            spans: FULL SCAN
+(12 rows)
+```
+
+Our estimate of the bottleneck was correct; the `FULL SCAN` is what takes a long time here. We can address this with a new index on length of `param4`:
+
+
+```sql
+CREATE INDEX ON stations_datapoints_mv(length(param4));
+```
+
+If we revisit the statement plan, we can see that the new index helps find the rows where `param4` is 23 characters long:
+
+```sql
+> EXPLAIN SELECT COUNT(*) FROM stations_datapoints_mv WHERE length(param4)=23;                                     
+                                 info
+-----------------------------------------------------------------------
+  distribution: local
+  vectorized: true
+
+  • group (scalar)
+  │
+  └── • scan
+        missing stats
+        table: stations_datapoints_mv@stations_datapoints_mv_expr_idx
+        spans: [/23 - /23]
+(9 rows)
+```
+
+Re-running the `SELECT` statement yield an much better result, in fact 132 times faster:
+
+```bash
+Time: 168ms total (execution 167ms / network 1ms)
+```
+
+Here is another example. Consider the following query:
+
+```sql
+SELECT at, param0 FROM stations_datapoints_mv
+  WHERE id='14d55e96-c1cd-49ee-a16d-82aa8aff1d13'; 
+```
+
+```bash
+Time: 21.001s total (execution 20.952s / network 0.048s)
+```
+
+Using `EXPLAIN` again, we can see a full scan with the consequitive filtering on the `id` column.
+
+
+```sql
+> EXPLAIN SELECT at, param0 FROM stations_datapoints_mv WHERE id='14d55e96-c1cd-49ee-a16d-82aa8aff1d13';           
+                                                 info
+------------------------------------------------------------------------------------------------------
+  distribution: local
+  vectorized: true
+
+  • filter
+  │ filter: id = '14d55e96-c1cd-49ee-a16d-82aa8aff1d13'
+  │
+  └── • scan
+        missing stats
+        table: stations_datapoints_mv@stations_datapoints_mv_pkey
+        spans: FULL SCAN
+
+  index recommendations: 1
+  1. type: index creation
+     SQL command: CREATE INDEX ON stations_datapoints_mv (id) STORING (at, param0);
+(14 rows)
+```
+
+This time, `EXPLAIN` even makes a suggestion how to create an index that will help optimize the query. Note the use of `STORING` which is useful when the query selects but not filtering certain columns.
+
+After create the recommended index, the same `SELECT` is a lot quicker.
+
+```bash
+Time: 66ms total (execution 14ms / network 53ms)
+```
+
+
 
 
 ## Materialized Views and CDC
 
 >[!NOTE]
 > Here I'm going to talk about creating a CHANGEFEED based on a materialized view since an MV is like a table...
+
+
+
+
+
+
+
+
 
 
 
@@ -420,71 +740,3 @@ CockroachDB allows materialized views to have indexes, making queries even more 
 
 
 
-## Code Examples
-
-
-```sql
-CREATE MATERIALIZED VIEW datapoints_json AS
-SELECT CAST(
-    format(
-    '{"at": "%s", "station": "%s", "param0": %s, "param1": %s, "param2": %s, "param3": %s, "param4": "%s"}',
-    at, station, param0, param1, param2, param3, param4
-    ) AS jsonb
-) AS datapoint
-FROM datapoints
-```
-
-
-```sql
-SELECT jsonb_pretty(datapoint) AS datapoing FROM datapoints_json LIMIT 10
-```
-
-```sql
-SELECT jsonb_pretty(datapoint)  AS param4 FROM datapoints_json WHERE datapoint->'param0' = '20' ORDER BY datapoint->'at' LIMIT 5
-```
-
-
-
-```sql
-SELECT COUNT(*) AS s_count, region
-FROM stations                                                           
-GROUP BY region ORDER BY s_count
-```
-
-
-```sql
-SELECT s.region, count(dp.at), min(dp.at), max(dp.at), sum(dp.param0),
-round(avg(dp.param2),5)
-FROM datapoints AS dp JOIN stations AS s ON s.id=dp.station
-GROUP BY s.region ORDER BY s.region
-```
-
-
-```sql
-WITH t AS (
-    SELECT generate_series  (
-        (SELECT date(now()))::timestamp,
-        (SELECT date(now()))::timestamp + '1 day' - '1 hour',
-        '1 hour'::interval
-    ) :: timestamp AS period
-)
-SELECT t.period, count(dp.at)
-FROM t AS t LEFT JOIN datapoints AS dp
-ON t.period <= dp.at AND dp.at < t.period +'1 hour'
-GROUP BY t.period ORDER BY t.period
-```
-
-
-```sql
-WITH t AS (
-    SELECT generate_series  (
-        (SELECT date(now()))::timestamp,
-        (SELECT date(now()))::timestamp + '1 day' - '1 hour',
-        '1 hour'::interval
-    ) :: timestamp AS period
-)
-SELECT t.period, array_to_json(array_agg(row_to_json(dp)))
-FROM t AS t LEFT JOIN datapoints AS dp                    
-ON t.period <= dp.at AND dp.at < t.period +'1 hour'
-GROUP BY t.period ORDER BY t.period
-```
