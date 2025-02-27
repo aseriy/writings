@@ -534,9 +534,10 @@ Time: 35ms total (execution 34ms / network 1ms)
 
 ## Performance via Indexing
 
-Materialized views are essentially physical tables, much like regular tables. The key difference is that data in a regular table is modified directly through operations like INSERT, UPDATE, DELETE, and LOAD, whereas a materialized view’s data changes indirectly by inheriting updates from its underlying tables.
+Materialized views are essentially physical tables, much like regular tables. The key difference is that data in a regular table is modified directly through operations like `INSERT`, `UPDATE`, `DELETE`, and `LOAD`, whereas a materialized view’s data changes indirectly by inheriting updates from its underlying tables.
 
-Once created, additional indexes can be added to further optimize SELECT queries against the materialized view. Let's create a materialized view joins the `stations` and `datapoints` tables, creating a result set that could useful for operational analytics.
+Once created, additional indexes can be added to further optimize `SELECT` queries against the materialized view. Let's create a materialized view joins the `stations` and `datapoints` tables, creating a result set that could support operational analytics and reporting.
+
 
 ```sql
 CREATE MATERIALIZED VIEW stations_datapoints_mv AS
@@ -672,8 +673,11 @@ Time: 66ms total (execution 14ms / network 53ms)
 
 ## Refreshing Materialized Views
 
+As mentioned earlier, materialized views are physical data snapshots based on the underlying `SELECT` query, following the "compute once, use many times" model. They don't continually update as the underlying tables' data changes. This enables to save on complex computing at the expense of not having the real-time reporing. The reality is that many reporting and analytics applications can tolarate a near-real time or even discrete, periodic data updates.
 
+A materialized view is first populated at creation time, and then updated, or re-freshed, with a `REFRESH` statement. Let see how it works in practice.
 
+Here is the partial out, just the first few rows of the result set, from a simple query against the materialized view we've already used previously.
 
 ```sql
 > SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
@@ -684,7 +688,12 @@ Time: 66ms total (execution 14ms / network 53ms)
   AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
   AP South (Mumbai)         | 378671 | 2024-01-01 00:01:10.243655 | 2025-12-31 22:11:12.574419 | 189667226 | -0.24969
   AP Southeast (Singapore)  | 421397 | 2024-01-01 00:00:28.748414 | 2025-12-31 21:36:30.986551 | 210984424 | -0.78571
-  ```
+```
+
+This view computes a number of data points for all the stations within each geographycal region. We're going to insert some new data points for the `AP East (Hong Kong)` region and verify that our materialized view reflects that.
+
+First, let's pick a station for our new data points to insert.
+
 
 ```sql
 t> SELECT * FROM stations WHERE region='AP East (Hong Kong)' LIMIT 1;                                               
@@ -694,12 +703,14 @@ t> SELECT * FROM stations WHERE region='AP East (Hong Kong)' LIMIT 1;
 (1 row)
 ```
 
-15 times
+Then, we insert fifteen new row by running the following statement repeatedly.
 
 ```sql
 INSERT INTO datapoints (at,station,param0,param1,param2,param3,param4)
     VALUES (now(),'15ac82da-072f-4403-8445-4ffc4a17c774',0,1,2.5,-3.7,'Hello World!');
 ```
+
+Remember that just because we have now introduced fifteen rows in the `datapoints` table, we don't expect it to be reflected automatically in the materialized view.
 
 ```sql
 > SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
@@ -709,6 +720,8 @@ INSERT INTO datapoints (at,station,param0,param1,param2,param3,param4)
   AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
   AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
 ```
+
+And as we can see, the count in the same column hasn't changed. What if we re-fresh our materialized view?
 
 ```sql
 REFRESH MATERIALIZED VIEW datapoint_aggregations_by_region_mt;
@@ -723,30 +736,7 @@ REFRESH MATERIALIZED VIEW datapoint_aggregations_by_region_mt;
   AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
 ```
 
-
-
-
-
-
-## What Are Materialized Views Used For?
-
-1. Performance Optimization
-Since materialized views store precomputed results, queries run much faster, reducing the load on the database.  
-
-2. Reducing Computation Costs
-Queries that involve heavy joins, aggregations, or calculations can be precomputed and stored, avoiding repeated expensive operations.  
-
-3. Supporting Analytics & Reporting
-Materialized views are useful for real-time or near-real-time analytics, as they provide a snapshot of data without needing to reprocess large datasets.  
-
-4. Decoupling Transactional and Analytical Workloads
-Instead of running analytics directly on live transactional tables, materialized views can provide a separate, optimized dataset for analytics while keeping transactional performance intact.  
-
-5. Indexing for Faster Query Performance
-CockroachDB allows materialized views to have indexes, making queries even more efficient.
-
-
-
+We can now observe that the data point count for the `AP East (Hong Kong)` region has increased by 15, as expected.
 
 
 
