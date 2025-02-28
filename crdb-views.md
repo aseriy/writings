@@ -2,7 +2,7 @@
 
  CockroachDB supports both regular SQL views and materialized views. In this article, I will review the key similarities and differences between them. I will then discuss how they can be leveraged in modern software applications.
 
-A view is a read-only virtual table created based on a SELECT statement that pulls data from one or multiple tables. The result set from this query defines the view. Once created, a view can be queried using SELECT, just like a regular table. In this article, I will explain some fundamentals of views.
+A view is a read-only virtual table based on a SELECT statement, pulling data from one or more tables. Once created, it can be queried like a regular table. This article covers the fundamentals of views and their applications.
 
 In this article, I'll be using a simple database with two tables to demonstrate the various features and capabilities of CockroachDB views. Before we begin delving into the details, let's look at the database schema.
 
@@ -45,7 +45,7 @@ CREATE VIEW station_count_by_region AS
     GROUP BY region ORDER BY region;
 ```
 
-The newly create view will show up in the list of tables:
+The newly created view will show up in the list of tables:
 
 ```sql
 > SHOW TABLES;
@@ -461,9 +461,9 @@ Time: 14.790s total (execution 14.788s / network 0.002s)
 Time: 31ms total (execution 30ms / network 1ms)
 ```
 
-We can observer the execution time improvment from almost 15 seconds to 31 milliseconds. The query against the materialized view is almost 500 times faster!
+We can observe the execution time improvement from almost 15 seconds to 31 milliseconds. The query against the materialized view is almost 500 times faster!
 
-Here is a more complex example. I'd like to compile a report of the datapoints created during the previuos day on an hourly basis.
+Here is a more complex example. I'd like to compile a report of the datapoints created during the previous day on an hourly basis.
 
 ```sql
 CREATE VIEW prev_day_datapoints_by_hour AS
@@ -621,7 +621,7 @@ If we revisit the statement plan, we can see that the new index helps find the r
 (9 rows)
 ```
 
-Re-running the `SELECT` statement yield an much better result, in fact 132 times faster:
+Re-running the `SELECT` statement yields a much better result, in fact 132 times faster:
 
 ```bash
 Time: 168ms total (execution 167ms / network 1ms)
@@ -638,7 +638,7 @@ SELECT at, param0 FROM stations_datapoints_mv
 Time: 21.001s total (execution 20.952s / network 0.048s)
 ```
 
-Using `EXPLAIN` again, we can see a full scan with the consequitive filtering on the `id` column.
+Using `EXPLAIN` again, we can see a full scan with the consecutive filtering on the `id` column.
 
 
 ```sql
@@ -673,7 +673,7 @@ Time: 66ms total (execution 14ms / network 53ms)
 
 ## Refreshing Materialized Views
 
-As mentioned earlier, materialized views are physical data snapshots based on the underlying `SELECT` query, following the "compute once, use many times" model. They don't continually update as the underlying tables' data changes. This enables to save on complex computing at the expense of not having the real-time reporing. The reality is that many reporting and analytics applications can tolarate a near-real time or even discrete, periodic data updates.
+As mentioned earlier, materialized views are physical data snapshots based on the underlying `SELECT` query, following the "compute once, use many times" model. They don't continually update as the underlying tables' data changes. This enables to save on complex computing at the expense of not having the real-time reporting. The reality is that many reporting and analytics applications can tolerate a near-real time or even discrete, periodic data updates.
 
 A materialized view is first populated at creation time, and then updated, or re-freshed, with a `REFRESH` statement. Let see how it works in practice.
 
@@ -690,7 +690,7 @@ Here is the partial out, just the first few rows of the result set, from a simpl
   AP Southeast (Singapore)  | 421397 | 2024-01-01 00:00:28.748414 | 2025-12-31 21:36:30.986551 | 210984424 | -0.78571
 ```
 
-This view computes a number of data points for all the stations within each geographycal region. We're going to insert some new data points for the `AP East (Hong Kong)` region and verify that our materialized view reflects that.
+This view computes a number of data points for all the stations within each geographical region. We're going to insert some new data points for the `AP East (Hong Kong)` region and verify that our materialized view reflects that.
 
 First, let's pick a station for our new data points to insert.
 
@@ -739,4 +739,17 @@ REFRESH MATERIALIZED VIEW datapoint_aggregations_by_region_mt;
 We can now observe that the data point count for the `AP East (Hong Kong)` region has increased by 15, as expected.
 
 
+## Takeaways
 
+CockroachDB offers both regular and materialized views, both of which are based on a SELECT query. Views enable:
+
+* Schema Abstraction – Simplifying database structure by presenting a logical view of the data.
+* Complexity Reduction – Exposing a clean, structured format tailored to application needs.
+* Backward Compatibility – Ensuring schema changes don't break applications.
+* Security Control – Restricting access by exposing or hiding data at the view level.
+
+Choosing the right type of view depends on specific performance and data freshness requirements.
+
+* Regular Views offer real-time, up-to-date data but require computation on every query, which can impact performance. They rely on underlying table indexes, but adding extra indexes for optimization may not always be desirable.
+
+* Materialized views are populated on demand—either at creation or through an explicit refresh—so they do not provide real-time data. They are best suited for applications that can tolerate discrete snapshots but require repeated, fast access to that data.
