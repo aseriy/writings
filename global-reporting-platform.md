@@ -1,755 +1,279 @@
-# CockroachDB Views
-
- CockroachDB supports both regular SQL views and materialized views. In this article, I will review the key similarities and differences between them. I will then discuss how they can be leveraged in modern software applications.
-
-A view is a read-only virtual table based on a SELECT statement, pulling data from one or more tables. Once created, it can be queried like a regular table. This article covers the fundamentals of views and their applications.
-
-In this article, I'll be using a simple database with two tables to demonstrate the various features and capabilities of CockroachDB views. Before we begin delving into the details, let's look at the database schema.
-
-```sql
-CREATE TABLE stations (
-    id UUID NOT NULL DEFAULT gen_random_uuid(),
-    region STRING NOT NULL,
-    CONSTRAINT stations_pkey PRIMARY KEY (id ASC),
-    INDEX index_region (region ASC)
-)
-```
-
-```sql
-CREATE TABLE datapoints (
-    at TIMESTAMP NOT NULL,
-    station UUID NOT NULL,
-    param0 INT8 NULL,
-    param1 INT8 NULL,
-    param2 FLOAT8 NULL,
-    param3 FLOAT8 NULL,
-    param4 STRING NULL,
-    CONSTRAINT "primary" PRIMARY KEY (at ASC, station ASC),
-    CONSTRAINT datapoints_station_fkey
-    FOREIGN KEY (station) REFERENCES public.stations(id)
-    ON DELETE CASCADE NOT VALID,
-    INDEX datapoints_at (at ASC),
-    INDEX datapoints_param0_rec_idx (param0 ASC),
-    INDEX datapoints_station_storing_rec_idx (station ASC)
-        STORING (param0, param1, param2, param3, param4)
-)
-```
-
-The `datapoints` table has a composite primary key and a foreign key that references the primary key from the `stations` table. Simply put, a `station` with a unique ID and located in some geographic region logs a timestamped datapoint consisting of two integers, two floats, and a string.
-
-Let's now create our first view.
-
-```sql
-CREATE VIEW station_count_by_region AS
-    SELECT region, COUNT(*) AS s_count FROM stations
-    GROUP BY region ORDER BY region;
-```
-
-The newly created view will show up in the list of tables:
-
-```sql
-> SHOW TABLES;
-  schema_name |       table_name        |       type        | owner | estimated_row_count |              locality
---------------+-------------------------+-------------------+-------+---------------------+--------------------------------------
-  public      | datapoints              | table             | root  |             8965278 | REGIONAL BY TABLE IN PRIMARY REGION
-  public      | station_count_by_region | view              | root  |                   0 | REGIONAL BY TABLE IN PRIMARY REGION
-  public      | stations                | table             | root  |                1000 | REGIONAL BY TABLE IN PRIMARY REGION
-(3 rows)
-
-Time: 86ms total (execution 85ms / network 1ms
-```
-
-And just like with regular tables, we can inspect the view structure:
-
-```sql
-> SHOW CREATE TABLE station_count_by_region;
-        table_name        |               create_statement
---------------------------+-----------------------------------------------
-  station_count_by_region | CREATE VIEW public.station_count_by_region (
-                          |     region,
-                          |     s_count
-                          | ) AS SELECT
-                          |         region, count(*) AS s_count
-                          |     FROM
-                          |         oltaptest.public.stations
-                          |     GROUP BY
-                          |         region
-                          |     ORDER BY
-                          |         region
-(1 row)
-
-Time: 101ms total (execution 100ms / network 1ms)
-```
-
-We can now query our new view:
-
-```sql
-> SELECT * FROM station_count_by_region ORDER BY s_count;
-           region           | s_count
-----------------------------+----------
-  EU South (Milan)          |      38
-  CA Central (Montreal)     |      39
-  US West (N. California)   |      39
-  Middle East (UAE)         |      40
-  EU West (Ireland)         |      40
-  US Mountain (Utah)        |      40
-  US East (N. Virginia)     |      40
-  South America (São Paulo) |      40
-  EU West (London)          |      41
-  US East (Ohio)            |      41
-  AP South (Mumbai)         |      42
-  EU West (Paris)           |      42
-  Middle East (Bahrain)     |      42
-  AP East (Hong Kong)       |      43
-  US West (Oregon)          |      45
-  EU North (Stockholm)      |      45
-  AP Southeast (Singapore)  |      47
-  AP Southeast (Sydney)     |      47
-  AP Northeast (Tokyo)      |      48
-  AP Northeast (Seoul)      |      49
-  Africa (Cape Town)        |      50
-  US Central (Iowa)         |      51
-  EU Central (Frankfurt)    |      51
-(23 rows)
-
-Time: 6ms total (execution 6ms / network 1ms)
-```
-
-```sql
-> SELECT region FROM station_count_by_region WHERE s_count >= 50;                                            
-          region
---------------------------
-  Africa (Cape Town)
-  EU Central (Frankfurt)
-  US Central (Iowa)
-(3 rows)
-
-Time: 5ms total (execution 4ms / network 0ms)
-```
-
-From an application programmer’s perspective, querying a view is much simpler than querying the underlying tables. This is especially true for complex queries that involve selecting specific columns across multiple tables, performing aggregations, calculations, ordering, and grouping.
-
-Here’s a slightly more complex example:
-
-
-```sql
-CREATE VIEW datapoint_aggregations_by_region AS
-    SELECT s.region, count(dp.at),
-        min(dp.at), max(dp.at), sum(dp.param0), round(avg(dp.param2),5)
-    FROM datapoints AS dp JOIN stations AS s
-    ON s.id=dp.station GROUP BY s.region
-    ORDER BY s.region;
-```
-
-
-This view tracks the number of data points logged by all stations in each region, along with statistical insights about their values. It effectively abstracts the underlying tables, making it easier and more flexible for users or applications to consume these statistics.
-
-
-```sql
-> SELECT * FROM datapoint_aggregations_by_region ORDER BY count;                                             
-           region           | count  |            min             |            max             |    sum    |  round
-----------------------------+--------+----------------------------+----------------------------+-----------+-----------
-  EU South (Milan)          | 340351 | 2024-01-01 00:01:32.609678 | 2025-12-31 21:12:33.453168 | 170458536 | -0.48192
-  CA Central (Montreal)     | 349670 | 2024-01-01 00:02:57.980154 | 2025-12-31 01:09:15.627789 | 175302382 | -1.53916
-  US West (N. California)   | 350124 | 2024-01-01 00:00:12.516719 | 2025-12-31 16:49:36.597159 | 175319370 |  0.62825
-  US East (N. Virginia)     | 358040 | 2024-01-01 00:04:27.843226 | 2025-12-31 17:54:48.949153 | 179662525 | -0.48187
-  South America (São Paulo) | 358608 | 2024-01-01 00:00:58.795327 | 2025-12-31 07:00:47.371553 | 179525128 |  0.68684
-  EU West (Ireland)         | 358780 | 2024-01-01 00:02:13.307588 | 2025-12-31 11:07:44.458828 | 180006357 | -0.83027
-  Middle East (UAE)         | 359131 | 2024-01-01 00:04:19.00066  | 2025-12-31 12:27:50.06722  | 180010196 | -1.19439
-  US Mountain (Utah)        | 359201 | 2024-01-01 00:01:45.94707  | 2025-12-31 20:58:29.325941 | 179906621 |  0.26272
-  EU West (London)          | 367823 | 2024-01-01 00:00:15.368232 | 2025-12-31 23:36:58.871405 | 184170156 |  0.70646
-  US East (Ohio)            | 368165 | 2024-01-01 00:00:40.68811  | 2025-12-31 13:00:36.747867 | 184330097 |  -0.1577
-  EU West (Paris)           | 376763 | 2024-01-01 00:01:36.959771 | 2025-12-31 21:33:26.791649 | 188771663 |  0.23122
-  Middle East (Bahrain)     | 377314 | 2024-01-01 00:02:50.66522  | 2025-12-31 17:16:53.973532 | 188989857 | -1.57602
-  AP South (Mumbai)         | 378091 | 2024-01-01 00:01:10.243655 | 2025-12-31 22:11:12.574419 | 189645615 | -0.01053
-  AP East (Hong Kong)       | 385864 | 2024-01-01 00:00:35.968385 | 2025-12-31 20:47:58.457602 | 193312606 |  2.44166
-  US West (Oregon)          | 403201 | 2024-01-01 00:00:07.869981 | 2025-12-31 19:06:13.687629 | 202159966 |   0.0564
-  EU North (Stockholm)      | 403811 | 2024-01-01 00:01:03.080359 | 2025-12-31 16:59:28.252544 | 202480668 |  0.51228
-  AP Southeast (Sydney)     | 420176 | 2024-01-01 00:02:51.279948 | 2025-12-31 22:11:52.821738 | 210640573 | -0.36275
-  AP Southeast (Singapore)  | 420736 | 2024-01-01 00:00:28.748414 | 2025-12-31 18:20:55.740461 | 210901653 | -0.82661
-  AP Northeast (Tokyo)      | 429476 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215381118 |  1.39954
-  AP Northeast (Seoul)      | 438708 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219870328 | -0.24195
-  Africa (Cape Town)        | 448461 | 2024-01-01 00:00:53.847385 | 2025-12-31 15:29:16.767401 | 224538752 |  0.15731
-  EU Central (Frankfurt)    | 457041 | 2024-01-01 00:02:19.140562 | 2025-12-31 20:00:30.427561 | 229046388 |  0.49903
-  US Central (Iowa)         | 457199 | 2024-01-01 00:00:28.579195 | 2025-12-31 21:53:40.025324 | 229038926 | -0.58941
-(23 rows)
-
-Time: 16.185s total (execution 16.184s / network 0.001s)
-```
-
-
-Since views act as a buffer between underlying tables and the queries run against them, they can serve as an effective mechanism for controlling data exposure. For example, station IDs in the `stations` and `datapoints` tables are not exposed through the view. As a result, a user with access to the view but not the underlying tables will be unable to see them.
-
-Let's demonstrate this with an example.
-
-First, we create a new user:
-
-```sql
-CREATE ROLE view_reader WITH PASSWORD NULL
-```
-
-```sql
-> SHOW ROLES;                                                              
-   username   | options | member_of
---------------+---------+------------
-  admin       |         | {}
-  root        |         | {admin}
-  view_reader |         | {}
-(3 rows)
-```
-
-```sql
-> SHOW GRANTS ON station_count_by_region;
-  database_name | schema_name |       table_name        | grantee | privilege_type | is_grantable
-----------------+-------------+-------------------------+---------+----------------+---------------
-  oltaptest     | public      | station_count_by_region | admin   | ALL            |      t
-  oltaptest     | public      | station_count_by_region | root    | ALL            |      t
-(2 rows)
-```
-
-The only permission granted to the new user will be the ability to read from this specific view.
-
-```sql
-GRANT SELECT ON station_count_by_region TO view_reader
-```
-
-```sql
->  SHOW GRANTS ON station_count_by_region;                                                                   
-  database_name | schema_name |       table_name        |   grantee   | privilege_type | is_grantable
-----------------+-------------+-------------------------+-------------+----------------+---------------
-  oltaptest     | public      | station_count_by_region | admin       | ALL            |      t
-  oltaptest     | public      | station_count_by_region | root        | ALL            |      t
-  oltaptest     | public      | station_count_by_region | view_reader | SELECT         |      f
-(3 rows)
-```
-
-After logging out and back in as the view_reader user, I can successfully SELECT from the view while the underlying tables remain inaccessible.
-
-```sql
-> SELECT * FROM station_count_by_region;
-           region           | s_count
-----------------------------+----------
-  AP East (Hong Kong)       |      43
-  AP Northeast (Seoul)      |      49
-  AP Northeast (Tokyo)      |      48
-  AP South (Mumbai)         |      42
-  AP Southeast (Singapore)  |      47
-  AP Southeast (Sydney)     |      47
-  Africa (Cape Town)        |      50
-  CA Central (Montreal)     |      39
-  EU Central (Frankfurt)    |      51
-  EU North (Stockholm)      |      45
-  EU South (Milan)          |      38
-  EU West (Ireland)         |      40
-  EU West (London)          |      41
-  EU West (Paris)           |      42
-  Middle East (Bahrain)     |      42
-  Middle East (UAE)         |      40
-  South America (São Paulo) |      40
-  US Central (Iowa)         |      51
-  US East (N. Virginia)     |      40
-  US East (Ohio)            |      41
-  US Mountain (Utah)        |      40
-  US West (N. California)   |      39
-  US West (Oregon)          |      45
-(23 rows)
-```
-
-```sql
-> SELECT * FROM stations;                                                                             
-ERROR: user view_reader does not have SELECT privilege on relation stations
-SQLSTATE: 42501
-```
-
-```sql
-> SELECT * FROM datapoints;                                                                           
-ERROR: user view_reader does not have SELECT privilege on relation datapoints
-SQLSTATE: 42501
-```
-
-
->[!WARNING]
-> Don't forget to log out and log back in as `root` user to continue.
-
-
-## Improving Application Maintainability
-
-Often, multiple applications access the same database. SQL statements may be scattered across the source code and maintained by different developers. As applications evolve, the underlying tables may require modifications, such as adding new columns.
-
-Let's consider an application that queries the `datapoints` table for ten random rows using a wildcard to select all columns:
-
-```sql
-> SELECT * FROM datapoints ORDER BY random() LIMIT 10;                                                             
-              at             |               station                | param0 | param1 |  param2  | param3  |              param4
------------------------------+--------------------------------------+--------+--------+----------+---------+-----------------------------------
-  2024-04-22 13:37:24.650472 | 43e02023-318a-456b-afcc-f942b9a2535c |    232 |    431 | -236.574 | -267.83 | J6L4EZ00OVJ2FYOH7O3DKAG9N2FM1YCX
-  2024-01-04 09:27:44.055629 | d043a889-2543-49e0-b14c-bf162d870138 |    412 |   -439 | -995.707 |  722.17 | 7YYR5MJLB130V1L
-  2024-01-01 19:47:07.569224 | 59d9a32f-bb9b-4e68-ae29-3b07fd63b8fa |    822 |    306 | -540.151 |  661.79 | ZJHI584OM7EA2HGKTNMED36YA6A
-  2024-09-29 15:41:22.547995 | 6c4d1c8d-ae07-4c41-867b-a94c39fc0dce |    207 |    199 |   966.73 |  852.67 | ADSFZ814BDT0WJA9D5C6BAQ
-  2024-11-21 12:54:58.784143 | eb45253f-40f7-49e0-928e-5e992a2f6f29 |    963 |    909 | -592.247 |  338.93 | Z2T0IO50GUBKNK3OLXUQWZ
-  2024-09-16 13:49:08.088792 | 15e6388c-d6cb-4ab7-a1c9-74279ed85b65 |     42 |   -661 |  558.163 | -512.06 | 6HTU762POZC26RPAJGIQ0OY5IVD
-  2024-11-17 15:13:10.101037 | 442f7037-e1d4-41f4-96a2-3267985db530 |    546 |    612 | -526.802 |  328.56 | 7VOK9W8B8XI2DS4F78MT7
-  2024-01-11 20:23:38.951431 | 65007721-e6c6-42b9-83bc-794b3ec49fb5 |    561 |   -198 | -352.847 |  -393.2 | MRM1EUYL6X3LKJEAGO76D
-  2024-10-07 12:26:31.833473 | aeba590d-23b1-483f-8160-d6484e57e319 |    896 |   -199 |  829.801 |  285.29 | 5YG7GFIJYVBXWKWM8
-  2024-01-07 07:23:58.807308 | b340926f-1e93-4b13-8ab6-e909bcf61251 |    492 |   -922 |  879.538 |   168.8 | JZBV2FW58FS6RNOV4WRX4P22SZ4ZQH5
-(10 rows)
-
-Time: 4.435s total (execution 4.434s / network 0.001s)
-```
-
-The application logic expects the result set to contain seven columns. Now, imagine a new column is added to the `datapoints` table:
-
-
-
-```sql
-> ALTER TABLE datapoints ADD COLUMN param5 JSONB DEFAULT '{}';
-```
-
-If the application logic is not designed to handle an eight-column result set from the same SELECT query, the change in table structure we introduced has broken the application.
-
-
-```sql
-> SELECT * FROM datapoints ORDER BY random() LIMIT 10;                                                             
-              at             |               station                | param0 | param1 |  param2  | param3  |             param4              | param5
------------------------------+--------------------------------------+--------+--------+----------+---------+---------------------------------+---------
-  2024-07-31 13:48:54.931012 | 4355b1e5-8ea6-4c0a-af60-3753dab17216 |    185 |   -871 |   635.05 | -710.54 | BL96AYU7UOAB8P                  | {}
-  2024-03-07 08:08:09.851961 | 616ca193-6b44-4f3e-ab13-e97a62a7ef6a |    800 |     11 |   419.02 |  263.11 | W8YHWQAAFMVAU                   | {}
-  2024-04-30 12:07:55.096663 | e0b0f651-22fa-41bd-9655-188ce7084118 |    987 |   -359 | -398.192 |  152.57 | AUIM0N46W5BEXEC                 | {}
-  2024-02-03 05:39:25.867489 | 86f8abc5-ae00-4de6-b028-f3a6e3372488 |    796 |   -261 | -396.695 | -805.73 | K3FMYHDIVL53FWM2NMO1G           | {}
-  2024-02-04 21:43:47.266435 | e8b67169-7227-46f6-9773-138f4186ad96 |     99 |    804 |  477.407 |  106.78 | V6QLTK3CAD7DLY                  | {}
-  2024-10-05 19:03:10.919085 | fd867da2-5cb5-4d22-b67c-f3fe7595808e |    684 |    138 | -360.136 | -522.33 | QD5VJ5V065HXYLRHO082            | {}
-  2024-02-26 15:00:40.049237 | c863dcfe-7f0a-4c69-82b0-676e5ba540e9 |    744 |    253 |   99.463 | -310.16 | 1LJMYAHT                        | {}
-  2024-12-15 16:25:40.518032 | 578adbd8-139f-435d-9fc7-d331fe5a43ef |    169 |    809 |   879.19 | -912.75 | TG1FTKU451E9Z056YUI93O5MFI61UAN | {}
-  2024-08-16 04:54:21.498491 | 733225a2-ea0b-4d43-861b-c861e04263f7 |    978 |    -71 | -466.731 |  613.45 | D4ZE8XR2SY6H1VBAR49OQWS         | {}
-  2024-03-04 20:43:42.718847 | e168f135-2ea9-4b7e-b94a-f792888f560f |    744 |    690 |   39.526 |  392.86 | WWRY6B4TE                       | {}
-(10 rows)
-
-Time: 9.920s total (execution 9.919s / network 0.001s)
-```
-
-Instead of modifying queries across multiple applications, we can decouple the application code from the database tables by using a view as an intermediary layer.
-
-
-```sql
-> CREATE VIEW datapoints_view AS
-    SELECT at, station, param0, param1, param2, param3, param4
-    FROM datapoints;
-```
-
-Using this new view instead of querying the underlying table directly protects the application logic from breaking when new columnss are introduced in the underlying table over time.
-
-```sql
-> SELECT * FROM datapoints_view ORDER BY random() LIMIT 10;                                                        
-              at             |               station                | param0 | param1 |  param2  | param3  |           param4
------------------------------+--------------------------------------+--------+--------+----------+---------+------------------------------
-  2024-08-25 14:04:17.994741 | 2eafe51e-48d5-4fd5-a48b-24011c93761d |    451 |    871 |   639.16 |   -5.22 | 0HDGG0XFQS94DH1
-  2024-08-14 14:58:03.715754 | 44abb1a9-4b58-4176-95e6-f4768d3c1ccc |    222 |   -601 | -633.222 |  -480.4 | JX88IT3MP6L3Q0L0GPIT
-  2024-01-07 15:03:52.48959  | 00700ae4-9b0f-4254-b374-07f7da901b7e |    625 |    539 | -588.502 | -303.34 | NXM0DV46Y3CRUQQG
-  2024-06-16 14:07:12.820695 | c8a97e4b-b967-4faa-a256-9f9d026a148a |    507 |    633 |  563.489 |  208.52 | EVGYJAVCICY9KFDD999QT8WQ1S
-  2024-01-09 05:33:46.011819 | 2c276cdd-a5fa-4472-816f-875f4a34c4c1 |    585 |    718 |   82.759 | -208.72 | EID9P2RQHFAUA
-  2024-08-27 16:51:51.984799 | becdf27a-99a2-4fbf-90ed-8970b3dc0eeb |     33 |    719 |     26.6 | -524.14 | FJRQMLPYM5UI5W9M6G7YU
-  2024-01-12 18:00:33.384313 | fdd6c283-b0b3-4c8e-9119-cbc60811f5ac |    146 |   -726 |  527.435 | -668.44 | 2OKMRASRT91IPWXNSLMLER
-  2024-01-11 14:49:10.817618 | 1fe82a22-d7ae-4c79-80a4-d4e2f604a76f |    566 |    672 |  983.465 | -536.14 | T24VYSZWGTE
-  2024-05-04 15:47:56.163271 | 876fff3f-f596-4d35-8761-3bcabcb6814b |    776 |   -976 |    534.9 |  503.45 | IDCCUUEGTYH98VI0MI0X15M7ZY6
-  2024-08-02 14:30:04.514187 | 155765ec-1911-4905-834d-ec303c61b1e1 |     89 |   -163 |   -18.21 |  730.63 | 2HHY98YIN
-(10 rows)
-
-Time: 17.584s total (execution 17.583s / network 0.001s)
-```
-
-
->[!WARNING]
-> This approach using views works only when new columns are added. However, to be fair, removing columns from a table should be rare. If truly necessary, it should be treated as a special effort, requiring a thorough review and retesting of associated applications.
-
-
-
-# Materialized Views
-
-While views are "virtual" tables that query the underlying physical tables each time they are accessed, materialized views store a physical copy of the query result. This key distinction makes materialized views extremely powerful, but before exploring their advantages, let's address their main drawback. Unlike regular views, which always retrieve up-to-date data from the underlying tables, materialized views act as snapshots that must be refreshed to reflect the latest changes. We’ll discuss how to refresh a materialized view later.
-
-
-## Performance via Pre-Compute
-
-A materialized view doesn’t re-run its base query each time it’s accessed. Instead, it serves a snapshot of the data saved when the view was created or last refreshed. Of course, querying a materialized view (SELECT) may involve filtering, ordering, grouping, and some calculations, but these operations are minimal compared to the compute time and resources required to refresh the view itself. Let's see this with some examples.
-
-Earlier, we created the `datapoint_aggregations_by_region` view. Let's create its materialized counterpart and run the same queries against both.
-
-```sql
-CREATE MATERIALIZED VIEW datapoint_aggregations_by_region_mt AS
-    SELECT s.region, count(dp.at),
-        min(dp.at), max(dp.at), sum(dp.param0), round(avg(dp.param2),5)
-    FROM datapoints AS dp JOIN stations AS s
-    ON s.id=dp.station GROUP BY s.region
-    ORDER BY s.region;
-```
-
-```sql
-> show tables;                                                                                                     
-  schema_name |             table_name              |       type        | owner | estimated_row_count |              locality
---------------+-------------------------------------+-------------------+-------+---------------------+--------------------------------------
-  public      | datapoint_aggregations_by_region    | view              | root  |                   0 | REGIONAL BY TABLE IN PRIMARY REGION
-  public      | datapoint_aggregations_by_region_mt | materialized view | root  |                   0 | GLOBAL
-  public      | datapoints                          | table             | root  |             8981218 | REGIONAL BY TABLE IN PRIMARY REGION
-  public      | station_count_by_region             | view              | root  |                   0 | REGIONAL BY TABLE IN PRIMARY REGION
-  public      | stations                            | table             | root  |                1000 | REGIONAL BY TABLE IN PRIMARY REGION
-(5 rows)
-
-Time: 92ms total (execution 91ms / network 1ms)
-```
-
-```sql
-> SELECT * FROM datapoint_aggregations_by_region;                                                                  
-           region           | count  |            min             |            max             |    sum    |  round
-----------------------------+--------+----------------------------+----------------------------+-----------+-----------
-  US West (N. California)   | 350691 | 2024-01-01 00:00:12.516719 | 2025-12-31 16:49:36.597159 | 175446728 |  0.45717
-  South America (São Paulo) | 359165 | 2024-01-01 00:00:58.795327 | 2025-12-31 23:52:08.399068 | 179633084 |  0.91175
-  EU North (Stockholm)      | 404430 | 2024-01-01 00:01:03.080359 | 2025-12-31 16:59:28.252544 | 202458880 |  0.26389
-  AP Southeast (Singapore)  | 421397 | 2024-01-01 00:00:28.748414 | 2025-12-31 21:36:30.986551 | 210984424 | -0.78571
-  US East (N. Virginia)     | 358626 | 2024-01-01 00:04:27.843226 | 2025-12-31 17:54:48.949153 | 179806306 | -0.58655
-  Africa (Cape Town)        | 449143 | 2024-01-01 00:00:53.847385 | 2025-12-31 15:29:16.767401 | 224587484 |   0.0202
-  EU West (Paris)           | 377413 | 2024-01-01 00:01:36.959771 | 2025-12-31 23:29:52.332873 | 188928503 |  0.45059
-  EU West (Ireland)         | 359352 | 2024-01-01 00:02:13.307588 | 2025-12-31 22:01:10.943634 | 180158447 | -1.24578
-  US East (Ohio)            | 368750 | 2024-01-01 00:00:40.68811  | 2026-01-01 00:22:08.381134 | 184493835 |   0.1954
-  EU West (London)          | 368435 | 2024-01-01 00:00:15.368232 | 2025-12-31 23:36:58.871405 | 184326196 |  0.53084
-  Middle East (UAE)         | 359750 | 2024-01-01 00:04:19.00066  | 2025-12-31 12:45:20.493968 | 180176997 | -1.23177
-  Middle East (Bahrain)     | 377942 | 2024-01-01 00:02:50.66522  | 2025-12-31 17:16:53.973532 | 189118140 | -1.41936
-  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
-  EU Central (Frankfurt)    | 457772 | 2024-01-01 00:02:19.140562 | 2025-12-31 20:00:30.427561 | 229213986 |  0.60474
-  US West (Oregon)          | 403878 | 2024-01-01 00:00:07.869981 | 2025-12-31 19:06:13.687629 | 202310533 | -0.16474
-  US Central (Iowa)         | 457892 | 2024-01-01 00:00:28.579195 | 2025-12-31 21:53:40.025324 | 229144648 | -0.76366
-  CA Central (Montreal)     | 350275 | 2024-01-01 00:02:57.980154 | 2025-12-31 07:50:43.08553  | 175438109 | -1.58814
-  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
-  AP Southeast (Sydney)     | 420793 | 2024-01-01 00:02:51.279948 | 2025-12-31 22:11:52.821738 | 210754146 | -0.26514
-  US Mountain (Utah)        | 359870 | 2024-01-01 00:01:45.94707  | 2026-01-01 00:08:42.451892 | 180035426 |   0.1786
-  AP East (Hong Kong)       | 386510 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |  2.64081
-  EU South (Milan)          | 340904 | 2024-01-01 00:01:32.609678 | 2025-12-31 21:30:38.453781 | 170529055 | -0.15573
-  AP South (Mumbai)         | 378671 | 2024-01-01 00:01:10.243655 | 2025-12-31 22:11:12.574419 | 189667226 | -0.24969
-(23 rows)
-
-Time: 14.790s total (execution 14.788s / network 0.002s)
-```
-
-```sql
-> SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
-           region           | count  |            min             |            max             |    sum    |  round
-----------------------------+--------+----------------------------+----------------------------+-----------+-----------
-  AP East (Hong Kong)       | 386510 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |  2.64081
-  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
-  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
-  AP South (Mumbai)         | 378671 | 2024-01-01 00:01:10.243655 | 2025-12-31 22:11:12.574419 | 189667226 | -0.24969
-  AP Southeast (Singapore)  | 421397 | 2024-01-01 00:00:28.748414 | 2025-12-31 21:36:30.986551 | 210984424 | -0.78571
-  AP Southeast (Sydney)     | 420793 | 2024-01-01 00:02:51.279948 | 2025-12-31 22:11:52.821738 | 210754146 | -0.26514
-  Africa (Cape Town)        | 449143 | 2024-01-01 00:00:53.847385 | 2025-12-31 15:29:16.767401 | 224587484 |   0.0202
-  CA Central (Montreal)     | 350275 | 2024-01-01 00:02:57.980154 | 2025-12-31 07:50:43.08553  | 175438109 | -1.58814
-  EU Central (Frankfurt)    | 457772 | 2024-01-01 00:02:19.140562 | 2025-12-31 20:00:30.427561 | 229213986 |  0.60474
-  EU North (Stockholm)      | 404430 | 2024-01-01 00:01:03.080359 | 2025-12-31 16:59:28.252544 | 202458880 |  0.26389
-  EU South (Milan)          | 340904 | 2024-01-01 00:01:32.609678 | 2025-12-31 21:30:38.453781 | 170529055 | -0.15573
-  EU West (Ireland)         | 359352 | 2024-01-01 00:02:13.307588 | 2025-12-31 22:01:10.943634 | 180158447 | -1.24578
-  EU West (London)          | 368435 | 2024-01-01 00:00:15.368232 | 2025-12-31 23:36:58.871405 | 184326196 |  0.53084
-  EU West (Paris)           | 377413 | 2024-01-01 00:01:36.959771 | 2025-12-31 23:29:52.332873 | 188928503 |  0.45059
-  Middle East (Bahrain)     | 377942 | 2024-01-01 00:02:50.66522  | 2025-12-31 17:16:53.973532 | 189118140 | -1.41936
-  Middle East (UAE)         | 359750 | 2024-01-01 00:04:19.00066  | 2025-12-31 12:45:20.493968 | 180176997 | -1.23177
-  South America (São Paulo) | 359165 | 2024-01-01 00:00:58.795327 | 2025-12-31 23:52:08.399068 | 179633084 |  0.91175
-  US Central (Iowa)         | 457892 | 2024-01-01 00:00:28.579195 | 2025-12-31 21:53:40.025324 | 229144648 | -0.76366
-  US East (N. Virginia)     | 358626 | 2024-01-01 00:04:27.843226 | 2025-12-31 17:54:48.949153 | 179806306 | -0.58655
-  US East (Ohio)            | 368750 | 2024-01-01 00:00:40.68811  | 2026-01-01 00:22:08.381134 | 184493835 |   0.1954
-  US Mountain (Utah)        | 359870 | 2024-01-01 00:01:45.94707  | 2026-01-01 00:08:42.451892 | 180035426 |   0.1786
-  US West (N. California)   | 350691 | 2024-01-01 00:00:12.516719 | 2025-12-31 16:49:36.597159 | 175446728 |  0.45717
-  US West (Oregon)          | 403878 | 2024-01-01 00:00:07.869981 | 2025-12-31 19:06:13.687629 | 202310533 | -0.16474
-(23 rows)
-
-Time: 31ms total (execution 30ms / network 1ms)
-```
-
-We can observe the execution time improvement from almost 15 seconds to 31 milliseconds. The query against the materialized view is almost 500 times faster!
-
-Here is a more complex example. I'd like to compile a report of the datapoints created during the previous day on an hourly basis.
-
-```sql
-CREATE VIEW prev_day_datapoints_by_hour AS
-  WITH t AS (
-    SELECT generate_series  (
-      (SELECT date(now()))::timestamp - INTERVAL '1 day',
-      (SELECT date(now()))::timestamp - '1 hour',
-      '1 hour'::interval
-    ) :: timestamp AS period
-  )
-  SELECT t.period, count(dp.at)
-    FROM t AS t LEFT JOIN datapoints AS dp
-      ON t.period <= dp.at AND dp.at < t.period +'1 hour'
-      GROUP BY t.period ORDER BY t.period;
-```
-
-```sql
-CREATE MATERIALIZED VIEW prev_day_datapoints_by_hour_mt AS
-  WITH t AS (
-    SELECT generate_series  (
-      (SELECT date(now()))::timestamp - INTERVAL '1 day',
-      (SELECT date(now()))::timestamp - '1 hour',
-      '1 hour'::interval
-    ) :: timestamp AS period
-  )
-  SELECT t.period, count(dp.at)
-    FROM t AS t LEFT JOIN datapoints AS dp
-      ON t.period <= dp.at AND dp.at < t.period +'1 hour'
-      GROUP BY t.period ORDER BY t.period;
-```
-
-Creating a regular view took 364 milliseconds, while creating a materialized view took 63.260 seconds. If the goal is to repeatedly access the generated report—such as through a microservice supporting a web or mobile application—the upfront compute cost of creating the materialized view is well justified. Over time, it will save the same time difference on every subsequent access.
-
-Here’s what the resulting report looks like:
-
-```sql
-> SELECT * FROM prev_day_datapoints_by_hour_mt;                                                                    
-        period        | count
-----------------------+--------
-  2025-02-26 00:00:00 |     7
-  2025-02-26 01:00:00 |     6
-  2025-02-26 02:00:00 |     6
-  2025-02-26 03:00:00 |     3
-  2025-02-26 04:00:00 |     1
-  2025-02-26 05:00:00 |     5
-  2025-02-26 06:00:00 |     2
-  2025-02-26 07:00:00 |     6
-  2025-02-26 08:00:00 |     5
-  2025-02-26 09:00:00 |     8
-  2025-02-26 10:00:00 |     6
-  2025-02-26 11:00:00 |     9
-  2025-02-26 12:00:00 |     7
-  2025-02-26 13:00:00 |     8
-  2025-02-26 14:00:00 |     2
-  2025-02-26 15:00:00 |     6
-  2025-02-26 16:00:00 |     4
-  2025-02-26 17:00:00 |     5
-  2025-02-26 18:00:00 |     3
-  2025-02-26 19:00:00 |     8
-  2025-02-26 20:00:00 |     3
-  2025-02-26 21:00:00 |     5
-  2025-02-26 22:00:00 |     5
-  2025-02-26 23:00:00 |     3
-(24 rows)
-
-Time: 35ms total (execution 34ms / network 1ms)
-```
-
-## Performance via Indexing
-
-Materialized views are essentially physical tables, much like regular tables. The key difference is that data in a regular table is modified directly through operations like `INSERT`, `UPDATE`, `DELETE`, and `LOAD`, whereas a materialized view’s data changes indirectly by inheriting updates from its underlying tables.
-
-Once created, additional indexes can be added to further optimize `SELECT` queries against the materialized view. Let's create a materialized view joins the `stations` and `datapoints` tables, creating a result set that could support operational analytics and reporting.
-
-
-```sql
-CREATE MATERIALIZED VIEW stations_datapoints_mv AS
-  SELECT
-      d.at, s.id, s.region,
-      d.param0, d.param1, d.param2, d.param3, d.param4
-  FROM stations as s JOIN datapoints as d
-  ON s.id=d.station
-  ORDER BY d.at;
-```
-
-```sql
-> SHOW COLUMNS FROM stations_datapoints_mv;                                                                        
-  column_name | data_type | is_nullable | column_default | generation_expression |            indices            | is_hidden
---------------+-----------+-------------+----------------+-----------------------+-------------------------------+------------
-  at          | TIMESTAMP |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
-  id          | UUID      |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
-  region      | STRING    |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
-  param0      | INT8      |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
-  param1      | INT8      |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
-  param2      | FLOAT8    |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
-  param3      | FLOAT8    |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
-  param4      | STRING    |      t      | NULL           |                       | {stations_datapoints_mv_pkey} |     f
-  rowid       | INT8      |      f      | unique_rowid() |                       | {stations_datapoints_mv_pkey} |     t
-(9 rows)
-```
-
-Now, let's look at the following query:
-
-```sql
-SELECT COUNT(*) FROM stations_datapoints_mv WHERE length(param4)=23;
-```
-
-```bash
-Time: 22.211s total (execution 22.211s / network 0.001s)
-```
-
-Not a great timing. This is likely because the SQL statement `WHERE` clause condition needs to filter on the length of the string in the `param4` column.  We can review the query plan with the `EXPLAIN` statement:
-
-```sql
-> EXPLAIN SELECT COUNT(*) FROM stations_datapoints_mv WHERE length(param4)=23;                                     
-                                 info
------------------------------------------------------------------------
-  distribution: local
-  vectorized: true
-
-  • group (scalar)
-  │
-  └── • filter
-      │ filter: length(param4) = 23
-      │
-      └── • scan
-            missing stats
-            table: stations_datapoints_mv@stations_datapoints_mv_pkey
-            spans: FULL SCAN
-(12 rows)
-```
-
-Our estimate of the bottleneck was correct; the `FULL SCAN` is what takes a long time here. We can address this with a new index on length of `param4`:
-
-
-```sql
-CREATE INDEX ON stations_datapoints_mv(length(param4));
-```
-
-If we revisit the statement plan, we can see that the new index helps find the rows where `param4` is 23 characters long:
-
-```sql
-> EXPLAIN SELECT COUNT(*) FROM stations_datapoints_mv WHERE length(param4)=23;                                     
-                                 info
------------------------------------------------------------------------
-  distribution: local
-  vectorized: true
-
-  • group (scalar)
-  │
-  └── • scan
-        missing stats
-        table: stations_datapoints_mv@stations_datapoints_mv_expr_idx
-        spans: [/23 - /23]
-(9 rows)
-```
-
-Re-running the `SELECT` statement yields a much better result, in fact 132 times faster:
-
-```bash
-Time: 168ms total (execution 167ms / network 1ms)
-```
-
-Here is another example. Consider the following query:
-
-```sql
-SELECT at, param0 FROM stations_datapoints_mv
-  WHERE id='14d55e96-c1cd-49ee-a16d-82aa8aff1d13'; 
-```
-
-```bash
-Time: 21.001s total (execution 20.952s / network 0.048s)
-```
-
-Using `EXPLAIN` again, we can see a full scan with the consecutive filtering on the `id` column.
-
-
-```sql
-> EXPLAIN SELECT at, param0 FROM stations_datapoints_mv WHERE id='14d55e96-c1cd-49ee-a16d-82aa8aff1d13';           
-                                                 info
-------------------------------------------------------------------------------------------------------
-  distribution: local
-  vectorized: true
-
-  • filter
-  │ filter: id = '14d55e96-c1cd-49ee-a16d-82aa8aff1d13'
-  │
-  └── • scan
-        missing stats
-        table: stations_datapoints_mv@stations_datapoints_mv_pkey
-        spans: FULL SCAN
-
-  index recommendations: 1
-  1. type: index creation
-     SQL command: CREATE INDEX ON stations_datapoints_mv (id) STORING (at, param0);
-(14 rows)
-```
-
-This time, `EXPLAIN` even suggests how to create an index to optimize the query. Note the use of `STORING`, which is useful when the query selects certain columns without filtering on them.
-
-After creating the recommended index, the same SELECT query runs much faster.
-
-```bash
-Time: 66ms total (execution 14ms / network 53ms)
-```
-
-
-## Refreshing Materialized Views
-
-As mentioned earlier, materialized views are physical data snapshots based on the underlying `SELECT` query, following the "compute once, use many times" model. They don't continually update as the underlying tables' data changes. This enables to save on complex computing at the expense of not having the real-time reporting. The reality is that many reporting and analytics applications can tolerate a near-real time or even discrete, periodic data updates.
-
-A materialized view is first populated at creation time, and then updated, or re-freshed, with a `REFRESH` statement. Let see how it works in practice.
-
-Here is the partial out, just the first few rows of the result set, from a simple query against the materialized view we've already used previously.
-
-```sql
-> SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
-           region           | count  |            min             |            max             |    sum    |  round
-----------------------------+--------+----------------------------+----------------------------+-----------+-----------
-  AP East (Hong Kong)       | 386510 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |  2.64081
-  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
-  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
-  AP South (Mumbai)         | 378671 | 2024-01-01 00:01:10.243655 | 2025-12-31 22:11:12.574419 | 189667226 | -0.24969
-  AP Southeast (Singapore)  | 421397 | 2024-01-01 00:00:28.748414 | 2025-12-31 21:36:30.986551 | 210984424 | -0.78571
-```
-
-This view computes a number of data points for all the stations within each geographical region. We're going to insert some new data points for the `AP East (Hong Kong)` region and verify that our materialized view reflects that.
-
-First, let's pick a station for our new data points to insert.
-
-
-```sql
-t> SELECT * FROM stations WHERE region='AP East (Hong Kong)' LIMIT 1;                                               
-                   id                  |       region
----------------------------------------+----------------------
-  15ac82da-072f-4403-8445-4ffc4a17c774 | AP East (Hong Kong)
-(1 row)
-```
-
-Then, we insert fifteen new row by running the following statement repeatedly.
-
-```sql
-INSERT INTO datapoints (at,station,param0,param1,param2,param3,param4)
-    VALUES (now(),'15ac82da-072f-4403-8445-4ffc4a17c774',0,1,2.5,-3.7,'Hello World!');
-```
-
-Remember that just because we have now introduced fifteen rows in the `datapoints` table, we don't expect it to be reflected automatically in the materialized view.
-
-```sql
-> SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
-           region           | count  |            min             |            max             |    sum    |  round
-----------------------------+--------+----------------------------+----------------------------+-----------+-----------
-  AP East (Hong Kong)       | 386510 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |  2.64081
-  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
-  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
-```
-
-And as we can see, the count in the same column hasn't changed. What if we re-fresh our materialized view?
-
-```sql
-REFRESH MATERIALIZED VIEW datapoint_aggregations_by_region_mt;
-```
-
-```sql
-> SELECT * FROM datapoint_aggregations_by_region_mt;                                                               
-           region           | count  |            min             |            max             |    sum    |  round
-----------------------------+--------+----------------------------+----------------------------+-----------+-----------
-  AP East (Hong Kong)       | 386525 | 2024-01-01 00:00:35.968385 | 2026-01-01 00:51:16.15568  | 193370853 |   2.6408
-  AP Northeast (Seoul)      | 439419 | 2024-01-01 00:03:53.638725 | 2025-12-31 22:45:57.040125 | 219958238 | -0.03357
-  AP Northeast (Tokyo)      | 430140 | 2024-01-01 00:00:51.013368 | 2026-01-01 00:15:51.983925 | 215479824 |  1.29681
-```
-
-We can now observe that the data point count for the `AP East (Hong Kong)` region has increased by 15, as expected.
-
-
-## Takeaways
-
-CockroachDB offers both regular and materialized views, both of which are based on a SELECT query. Views enable:
-
-* Schema Abstraction – Simplifying database structure by presenting a logical view of the data.
-* Complexity Reduction – Exposing a clean, structured format tailored to application needs.
-* Backward Compatibility – Ensuring schema changes don't break applications.
-* Security Control – Restricting access by exposing or hiding data at the view level.
-
-Choosing the right type of view depends on specific performance and data freshness requirements.
-
-* Regular Views offer real-time, up-to-date data but require computation on every query, which can impact performance. They rely on underlying table indexes, but adding extra indexes for optimization may not always be desirable.
-
-* Materialized views are populated on demand—either at creation or through an explicit refresh—so they do not provide real-time data. They are best suited for applications that can tolerate discrete snapshots but require repeated, fast access to that data.
+# Rethinking the Reporting Platform
+
+The data doesn’t just serve the business anymore. The data is the business.
+
+Every transaction, every decision, every customer experience depends on having timely, trustworthy insight — not weekly, not daily, but continually. The reporting platform has become the connective tissue between data and decision: not a passive destination, but an active system that drives the business forward.
+
+And it’s under strain.
+
+As data volumes explode, regulations grow more specific, and expectations shift from static dashboards to AI-powered interactivity, most reporting architectures are struggling to keep up. Not because of poor planning — but because the architecture that once made sense is no longer enough.
+
+This article explores how CockroachDB enables a fundamentally better foundation for modern reporting platforms — one built not just to handle data, but to elevate it into decision-making fuel: live, accurate, compliant, and available everywhere it’s needed.
+
+
+
+## An Architecture That Made Sense — Until the Requirements Changed
+
+For years, reporting platforms were assembled out of necessity. A transactional database for capturing business events. A warehouse for aggregating metrics. A cache to serve dashboards. A pipeline to move data between them. A document store for flexibility. A queue for ingest. A search layer for exploration.
+
+Each addition solved a real problem. Each decision was reasonable.
+
+But collectively, these systems have introduced a new class of complexity.
+
+As reporting platforms expanded across geographies, functions, and use cases, the challenges became harder to ignore.
+
+### Data inconsistency
+When reporting logic is spread across systems, it's easy for definitions to drift. Metrics calculated in the warehouse may not match what’s seen in the dashboard cache, or what was written to a downstream ML model. Even slight mismatches erode trust—especially when leadership needs to make fast, high-stakes decisions based on what they see.
+
+### Latency
+Reporting is expected to be real-time, but the infrastructure isn't. Data moves across systems via scheduled pipelines or streaming layers that introduce lag, retries, or partial delivery. Cross-region access only adds to the problem, leaving business teams waiting—sometimes unknowingly—on stale data.
+
+### Change friction
+Business metrics change. So do compliance rules, market definitions, product structures. But propagating those changes through a fragmented stack is slow and brittle. A schema change upstream might require days of regression testing downstream, delaying updates and discouraging iteration.
+
+### Operational overhead
+Each system in the reporting chain requires its own deployment model, upgrade lifecycle, security profile, and monitoring footprint. Keeping them in sync—and available—is a full-time job. The more systems involved, the harder it becomes to maintain SLAs and prevent regressions.
+
+### Talent fragmentation
+One team speaks SQL, another Spark, another MongoDB. Data scientists build workarounds in Jupyter. Platform teams try to glue it all together. This fragmentation creates handoffs, rework, and unnecessary learning curves—especially when onboarding new teams or reacting to production incidents.
+
+### Compliance risk
+As data crosses system boundaries, visibility fades. Where is a given record at any moment? Who accessed it? Is it in the right region? Is it auditable? For organizations operating under regulations like GDPR, APRA, or sector-specific retention laws, this uncertainty isn't just technical debt—it’s liability.
+
+
+Even with well-governed teams and disciplined engineering, these issues emerge organically — because the systems were never designed to function as one. They were bolted together over time to meet rising demands.
+
+The real problem isn’t any one system — it’s the mismatch between today’s reporting requirements and the architecture inherited to support them.
+
+Reporting platforms are no longer just about describing the past. They power risk models, drive customer experiences, trigger alerts, and feed AI systems. They’re operational. Real-time. Always-on. And the infrastructure underneath them needs to evolve accordingly.
+
+
+
+## A Modern Foundation for a New Reporting Reality
+
+CockroachDB isn’t trying to patch over the complexity of yesterday’s reporting architectures. It’s replacing the foundation with one built for what reporting is becoming: global, real-time, always-on, and increasingly AI-powered.
+
+Rather than relying on the application layer or orchestration logic to stitch together consistency, availability, and compliance, CockroachDB provides these guarantees by design.
+
+Let’s revisit the challenges from earlier — and how CockroachDB addresses each one directly.
+
+### Data consistency
+
+#### The Problem in Traditional Architectures
+
+In most reporting stacks today, data is scattered across multiple systems — each optimized for a specific task:
+
+- OLTP systems for ingestion (e.g. Oracle, Postgres)
+- ETL jobs that batch into warehouses
+- Caches or BI serving layers for fast read access
+
+The problem? These systems aren’t consistent with each other, and they’re rarely in sync. It’s common for a metric to show one value in a dashboard and a different value in a back-end audit log.
+
+This leads to:
+
+- Conflicting reports
+- Mistrust in metrics
+- Manual reconciliation workflows
+- Delays in decision-making
+
+And worst of all — these inconsistencies are often invisible until it’s too late.
+
+#### How CockroachDB Solves This
+
+CockroachDB is natively consistent, by design. It uses a combination of distributed consensus (via Raft) and multi-version concurrency control (MVCC) to guarantee that every transaction is:
+
+- Serializable — the highest isolation level
+- Globally ordered — even across regions
+- Applied only once, consistently, in the same order for all nodes
+
+This means that every read reflects a real and complete state of the system — even if the data was written on another continent, moments earlier.
+
+#### Why This Matters for Reporting
+
+**All data is authoritative**<br>
+Dashboards, anomaly detection models, and alerts are all built on the same consistent truth — no stale caches, no lagging replicas, no batch windows.
+
+**No stale reads, even across regions**<br>
+Reporting consumers in EMEA will see the same totals as their counterparts in the U.S. or APAC — no need to “wait for the sync.”
+
+**No reconciliation logic in app code**<br>
+You don’t need to guess whether the warehouse is caught up or if the dashboard layer needs a refresh. Consistency is guaranteed, which removes entire categories of bugs.
+
+**Trust in decision-making**<br>
+In financial services and compliance-heavy environments, being able to say "this data is correct, now" isn’t a luxury — it’s a requirement.
+
+**Strong consistency underpins auditability**<br>
+For regulated reporting, audit trails must reflect accurate system state. CockroachDB’s consistency guarantees ensure that what’s logged and reported reflects exactly what happened — with no reordering or duplication.
+
+TODO: FORMAT THE TABLE
+
+Comparison to Other Systems
+System Type	Default Consistency	Implication for Reporting
+PostgreSQL (single-node)	Strong	Safe, but not scalable or globally available
+MongoDB / Cassandra	Eventual	Fast but may serve incomplete or outdated data
+Warehouses + ETL	Batch	Always out of date to some degree
+CockroachDB	Serializable (global)	Always accurate, always current
+
+### Latency
+
+The Problem in Traditional Reporting Architectures
+In most legacy architectures, reporting data is centralized—often in a primary data center or a cloud region in the U.S. Data from global sources is funneled in through pipelines, and queries from distributed teams must cross continents to fetch results.
+
+This architecture introduces two forms of latency:
+
+Ingest latency — data takes too long to arrive at the reporting platform
+
+Query latency — users wait too long to get results, especially when operating globally
+
+This isn't just a performance nuisance. It's a decision-making bottleneck. When dashboards lag, alerts arrive late, or AI models respond on stale data, the result is hesitation, mistrust, or incorrect action.
+
+How CockroachDB Addresses Latency
+CockroachDB is a globally distributed, active-active SQL database designed to serve data as close to its source — and its consumer — as possible.
+
+1. Local Writes
+CockroachDB supports writing data near where it's generated. For example, applications in Singapore can ingest into local replicas in APAC. This means transaction data, logs, and metrics can land in-region with minimal latency — without complex forwarding or replication layers.
+
+Impact: lower ingest latency, better reliability at the edge, and faster data freshness for downstream systems.
+
+2. Local Reads
+CockroachDB routes reads to the nearest replica by default. A user in London running a dashboard doesn't need to reach across the ocean to a primary U.S. region — they get their data from a local replica, already in sync.
+
+Impact: responsive dashboards, faster API results, smoother UX for business users everywhere.
+
+3. Global Tables for Reference Data
+Many reporting queries rely on shared lookup data: currency conversion rates, product mappings, regulatory thresholds. These datasets are read-heavy, write-light, and needed in every region.
+
+CockroachDB allows these to be stored as Global Tables, which are automatically replicated across all regions.
+
+Take currency conversion rates: a small table, updated once per day — but queried constantly in every P&L rollup. With a Global Table, each region accesses this data locally, with no cross-region latency and no need for application-side caching.
+
+Impact: Fast, consistent joins across regions. No lookup lag. No stale reference data.
+
+4. Topology-Aware Query Planning
+CockroachDB’s cost-based optimizer plans queries based on data location, partitioning, and replica distribution. That means less cross-region data movement and better utilization of local compute and I/O.
+
+Impact: faster queries that scale with the footprint of your infrastructure, not against it.
+
+Why This Matters for Reporting
+Faster time-to-insight: No waiting on overnight ETL jobs or cross-region syncs.
+
+Real-time dashboards that actually are real-time: Not “eventually up to date,” but live.
+
+Lower latency for AI/ML models: Especially those integrated into reporting workflows.
+
+Improved global equity: Users in any region experience the same speed and trust in their reports.
+
+
+
+
+The result: faster dashboards, lower AI inference latencies, better user experience.
+
+### Change friction
+
+The Problem
+Reporting platforms live in a constant state of evolution. Business teams add new KPIs. Compliance introduces new dimensions. Product launches trigger new reporting structures. And all of that means changes to schemas, indexes, and query logic.
+
+In traditional systems, these changes are hard. Schema updates often require:
+
+Downtime windows
+
+Application restarts
+
+Migration scripts
+
+Risky lock-based DDL operations
+
+Worse, in distributed or multi-database reporting environments, every change must propagate through multiple systems: OLTP → ETL → warehouse → dashboard layer. Each hop increases the risk of drift, delay, and failure.
+
+As a result, teams delay changes, wrap them in weeks of QA, or sidestep them altogether — leading to stale logic and reporting workarounds.
+
+How CockroachDB Addresses Change Friction
+CockroachDB was designed for environments where change is constant — including reporting platforms.
+
+Here’s how it removes friction:
+
+1. Online Schema Changes
+You can add or drop columns, indexes, constraints, or default values without locking the table or taking the system offline. CockroachDB executes these changes asynchronously in the background, while the database continues to serve live traffic.
+
+Impact: Schema updates can be deployed during business hours, even during active reporting or ingest.
+
+2. Transactional DDL
+Schema changes in CockroachDB are full-fledged transactions. That means:
+
+They can be rolled back if needed
+
+They interact safely with other reads and writes
+
+You can reason about them like any other change in your system
+
+Impact: Developers and data engineers don’t have to worry about half-applied or partially failed migrations.
+
+3. Declarative Migrations via SQL
+Schema changes are applied declaratively via standard SQL — no proprietary tooling, no manual coordination between teams. This aligns well with modern CI/CD workflows, dbt, and enterprise change control pipelines.
+
+Impact: Infrastructure teams can automate schema evolution, audit it, and gate it through normal change control processes.
+
+Why This Matters for Reporting
+KPI agility: You can add new dimensions or metrics to your reporting system in hours, not weeks.
+
+Lower coordination overhead: Front-end dashboard teams and back-end data engineers don’t need to freeze the system just to evolve it.
+
+Production-safe changes: Schema evolution doesn’t introduce operational risk.
+
+Faster iteration: Business questions can be answered in days, not deferred to the next sprint.
+
+Real-World Example
+A compliance team needs to begin reporting on a new transaction tag for AML audits. The tag doesn’t exist in the reporting pipeline. With CockroachDB, the team adds a column, rolls out a backfill job, and updates the view logic—all without taking the system offline or delaying other reporting functions.
+
+
+### Operational overhead
+CockroachDB consolidates workloads: transactional ingest, real-time query serving, and regulatory enforcement can all happen in one system. This reduces the number of systems to secure, monitor, scale, and upgrade.
+
+One database to run, not five to integrate.
+
+### Talent alignment
+CockroachDB is PostgreSQL-compatible. Analysts, data engineers, and developers can query it using standard SQL. Tools work out of the box. There's no custom language, no learning curve, and no translation layer.
+
+Teams work faster, hire easier, and collaborate more naturally.
+
+### Compliance and auditability
+Data can be geo-partitioned to reside in specific regions or jurisdictions. CockroachDB enforces data locality while preserving consistency—so you don’t have to build workarounds to meet compliance needs.
+
+Location-aware, legally aligned, and fully auditable—by default.
+
+
+
+
+
+
+## Where This Platform Makes the Most Impact
+
+The need for real-time insight, regulatory clarity, and globally accessible data isn’t unique to financial services. Many industries are facing the same architectural inflection point: reporting can no longer lag behind the business — it must operate alongside it.
+
+This is where a modern, globally distributed reporting platform delivers the most impact: not just in raw speed, but in trust, consistency, and resilience.
+
+Here are a few environments where the benefits of CockroachDB’s architecture are particularly valuable:
+
+**Financial Services**<br>
+Risk management, compliance, trading oversight, fraud detection — all depend on data that is correct, timely, and often jurisdiction-specific. Reporting systems must serve global teams while aligning with region-specific data rules. Latency or inconsistency in this context isn’t just a technical issue — it’s a governance failure.
+
+**Air Travel and Transportation Networks**<br>
+Systems that support airport operations, railway scheduling, or shipping coordination rely on constant telemetry from distributed endpoints. While CockroachDB isn’t deployed on disconnected assets like planes or ships, it supports regional aggregation and global coordination by allowing operational apps to write to the nearest available region and access consistent views in real time.
+
+**Healthcare Systems**<br>
+Multi-site hospital networks, labs, and care providers require access to consistent patient and operational data — often under strict regulatory boundaries. Whether it’s audit logs, lab results, or shared clinical summaries, reporting platforms must deliver fast, correct data that respects locality and privacy.
+
+**Energy and Utilities**<br>
+Grid monitoring, carbon tracking, usage forecasting, and infrastructure telemetry require ingesting high-frequency data across regions. Reporting systems must provide visibility and alerting based on consistent, always-on data. Latency or inconsistency here can translate to downtime, fines, or worse.
+
+**Supply Chain and Logistics**<br>
+Distributed fulfillment, inventory tracking, and shipment monitoring all require accurate, up-to-date reporting across regions and systems. When every warehouse, terminal, and distribution center needs visibility — and when leadership needs to make decisions across all of them — reporting can’t be regional or batch-based. It must be unified and immediate.
+
+**AI-Powered SaaS and Analytics Platforms**<br>
+AI-driven analytics platforms increasingly blur the line between reporting and real-time decision-making. Whether powering anomaly detection, recommendation engines, or conversational interfaces, these systems need fast, fresh, trustworthy data — often across regions and user bases. Latency or data gaps can degrade not just the user experience, but the model output itself.
+
+### A Common Pattern
+
+Wherever decisions are time-sensitive, globally distributed, and subject to regulatory scrutiny, a new kind of reporting platform is required — one that can meet the moment with consistency, locality, and resilience.
+
+CockroachDB provides the infrastructure to build exactly that.
